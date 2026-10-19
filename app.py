@@ -92,6 +92,7 @@ HTML_PAGE = """
     --input-bg: #ffffff;
     --spec-bg: #fff0d9;
     --modal-overlay-bg: rgba(61, 32, 0, 0.65);
+    --danger: #d32f2f;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -237,6 +238,28 @@ HTML_PAGE = """
     box-shadow: 0 2px 10px rgba(0,0,0,0.1);
   }
 
+  /* Кнопки админа в карточке */
+  .admin-actions {
+    display: none;
+    margin-top: 20px;
+    gap: 10px;
+    justify-content: center;
+  }
+  .admin-actions button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 10px;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    color: #fff;
+    transition: 0.2s;
+  }
+  .admin-actions button.edit-btn { background: #1976d2; }
+  .admin-actions button.edit-btn:hover { background: #1565c0; box-shadow: 0 0 15px rgba(25,118,210,0.5); }
+  .admin-actions button.delete-btn { background: var(--danger); }
+  .admin-actions button.delete-btn:hover { background: #b71c1c; box-shadow: 0 0 15px rgba(211,47,47,0.5); }
+
   .admin-bar {
     text-align: center;
     padding: 40px 20px;
@@ -367,17 +390,26 @@ HTML_PAGE = """
       <p>Отсканируйте, чтобы открыть эту карточку</p>
       <img id="qrImage" src="" alt="QR Code">
     </div>
+
+    <!-- Кнопки редактирования и удаления (видны только админу) -->
+    <div id="adminActions" class="admin-actions">
+      <button class="edit-btn" onclick="editCar()">Редактировать</button>
+      <button class="delete-btn" onclick="deleteCar()">Удалить</button>
+    </div>
   </div>
 </div>
 
 <div id="addModal" class="modal-overlay">
   <div class="modal">
     <button class="modal-close" onclick="closeAddModal()">×</button>
-    <h2>Добавить машину</h2>
+    <h2 id="addModalTitle">Добавить машину</h2>
     <form id="addForm" onsubmit="submitCar(event)">
       <div class="form-group">
         <label>Фото машины (вид сбоку)</label>
-        <input type="file" id="carImage" accept="image/*" required>
+        <input type="file" id="carImage" accept="image/*">
+        <div id="imageNote" style="font-size: 0.8rem; color: var(--muted); margin-top: 4px; display: none;">
+          (оставьте пустым, чтобы не менять текущее фото)
+        </div>
       </div>
       <div class="form-group">
         <label>Название машины</label>
@@ -412,7 +444,7 @@ HTML_PAGE = """
           <option value="AWD">Полный</option>
         </select>
       </div>
-      <button type="submit" class="submit-btn">Добавить</button>
+      <button type="submit" class="submit-btn" id="submitBtnText">Добавить</button>
       <div id="addError" class="error-msg"></div>
       <div id="addSuccess" class="success-msg"></div>
     </form>
@@ -432,6 +464,8 @@ HTML_PAGE = """
   const API = '';
   let isAdmin = false;
   let adminCode = '';
+  let currentViewCar = null; // Машина, открытая в данный момент
+  let editingCarId = null;   // ID машины, которую редактируем (null = добавление)
 
   window.addEventListener('error', function(e) {
     console.error('JS Error:', e.message, 'at', e.filename, e.lineno);
@@ -439,6 +473,7 @@ HTML_PAGE = """
 
   function compressImage(file, maxWidth = 800, quality = 0.8) {
     return new Promise((resolve, reject) => {
+      if (!file) return resolve(null);
       const reader = new FileReader();
       reader.readAsDataURL(file);
       reader.onload = event => {
@@ -508,7 +543,6 @@ HTML_PAGE = """
           openViewModal(targetCar);
         }
       }
-      // ----------------------------------
 
     } catch (err) {
       console.error('loadCars failed:', err);
@@ -516,6 +550,7 @@ HTML_PAGE = """
   }
 
   function openViewModal(car) {
+    currentViewCar = car;
     document.getElementById('viewName').textContent = car.name;
     document.getElementById('viewVin').textContent = 'VIN: ' + car.vin;
     document.getElementById('viewImage').src = car.image_base64 ? 'data:image/jpeg;base64,' + car.image_base64 : '';
@@ -529,20 +564,21 @@ HTML_PAGE = """
       <div class="spec-item"><div class="spec-label">Привод</div><div class="spec-value">${drivetrainMap[car.drivetrain] || car.drivetrain}</div></div>
     `;
 
-    // Генерация QR-кода для этой машины
+    // Генерация QR-кода
     const baseUrl = window.location.origin + window.location.pathname;
     const shareUrl = baseUrl + '?vin=' + car.vin;
-    
-    // Используем бесплатный API для генерации QR (цвет оранжевый)
     const qrApi = `https://quickchart.io/qr?text=${encodeURIComponent(shareUrl)}&size=200&color=ff8c00`;
     document.getElementById('qrImage').src = qrApi;
+
+    // Показываем кнопки админа, если он активирован
+    document.getElementById('adminActions').style.display = isAdmin ? 'flex' : 'none';
 
     document.getElementById('viewModal').classList.add('active');
   }
 
   function closeViewModal() {
     document.getElementById('viewModal').classList.remove('active');
-    // Очищаем URL при закрытии модалки, чтобы можно было открыть другую
+    currentViewCar = null;
     if (window.history.replaceState) {
       window.history.replaceState({}, document.title, window.location.pathname);
     }
@@ -564,26 +600,84 @@ HTML_PAGE = """
         adminCode = code;
         document.getElementById('addCarBtn').classList.add('visible');
         errEl.style.display = 'none';
+        // Если открыта карточка, сразу показываем кнопки
+        if (currentViewCar) {
+          document.getElementById('adminActions').style.display = 'flex';
+        }
       } else {
         errEl.textContent = 'Неверный код';
         errEl.style.display = 'block';
       }
     } catch (err) {
-      console.error('activateAdmin failed:', err);
       errEl.textContent = 'Ошибка сети';
       errEl.style.display = 'block';
     }
   }
 
+  // --- Добавление / Редактирование ---
   function openAddModal() {
     if (!isAdmin) return;
+    
+    editingCarId = null; // Сбрасываем режим редактирования
+    document.getElementById('addForm').reset();
+    document.getElementById('addModalTitle').textContent = 'Добавить машину';
+    document.getElementById('submitBtnText').textContent = 'Добавить';
+    document.getElementById('imageNote').style.display = 'none';
+    document.getElementById('carImage').required = true; // При добавлении фото обязательно
+    
+    document.getElementById('addError').style.display = 'none';
+    document.getElementById('addSuccess').style.display = 'none';
+    document.getElementById('addModal').classList.add('active');
+  }
+
+  function editCar() {
+    if (!isAdmin || !currentViewCar) return;
+    
+    editingCarId = currentViewCar.id;
+    const car = currentViewCar;
+    
+    // Заполняем форму данными
+    document.getElementById('carName').value = car.name;
+    document.getElementById('carStars').value = car.stars;
+    document.getElementById('carVin').value = car.vin;
+    document.getElementById('carHp').value = car.horsepower;
+    document.getElementById('carAccel').value = car.acceleration;
+    document.getElementById('carTopSpeed').value = car.top_speed;
+    document.getElementById('carDrivetrain').value = car.drivetrain;
+    
+    // Настраиваем интерфейс под редактирование
+    document.getElementById('addModalTitle').textContent = 'Редактировать машину';
+    document.getElementById('submitBtnText').textContent = 'Сохранить';
+    document.getElementById('imageNote').style.display = 'block';
+    document.getElementById('carImage').required = false; // Фото не обязательно менять
+    
+    document.getElementById('addError').style.display = 'none';
+    document.getElementById('addSuccess').style.display = 'none';
+    
+    closeViewModal();
+    document.getElementById('addModal').classList.add('active');
+  }
+
+  async function deleteCar() {
+    if (!isAdmin || !currentViewCar) return;
+    
+    const confirmDelete = confirm(`Вы уверены, что хотите удалить машину "${currentViewCar.name}"?`);
+    if (!confirmDelete) return;
+
     try {
-      document.getElementById('addForm').reset();
-      document.getElementById('addError').style.display = 'none';
-      document.getElementById('addSuccess').style.display = 'none';
-      document.getElementById('addModal').classList.add('active');
+      const res = await fetch(`${API}/api/cars/${currentViewCar.id}?admin_code=${adminCode}`, {
+        method: 'DELETE'
+      });
+      
+      if (res.ok) {
+        closeViewModal();
+        await loadCars();
+      } else {
+        alert('Ошибка при удалении машины');
+      }
     } catch (err) {
-      console.error('openAddModal failed:', err);
+      console.error('deleteCar failed:', err);
+      alert('Ошибка сети при удалении');
     }
   }
 
@@ -606,17 +700,27 @@ HTML_PAGE = """
 
     const fileInput = document.getElementById('carImage');
     const file = fileInput.files[0];
-    if (!file) {
+    
+    // Если добавляем новую, фото обязательно
+    if (!editingCarId && !file) {
       errEl.textContent = 'Выберите изображение';
       errEl.style.display = 'block';
       return;
     }
 
-    sucEl.textContent = 'Обработка фото...';
+    sucEl.textContent = 'Обработка...';
     sucEl.style.display = 'block';
 
     try {
-      const base64 = await compressImage(file, 800, 0.8);
+      let base64 = null;
+      
+      // Если выбрали новое фото — сжимаем. Если редактируем и фото нет — оставляем null, бэкенд сохранит старое.
+      if (file) {
+        base64 = await compressImage(file, 800, 0.8);
+      } else if (editingCarId) {
+        base64 = currentViewCar.image_base64; // Берем старое фото
+      }
+      
       sucEl.textContent = 'Сохранение...';
       
       const payload = {
@@ -631,19 +735,25 @@ HTML_PAGE = """
         admin_code: adminCode
       };
 
-      const res = await fetch(API + '/api/cars', {
-        method: 'POST',
+      let url = API + '/api/cars';
+      let method = 'POST';
+
+      if (editingCarId) {
+        url = `${API}/api/cars/${editingCarId}`;
+        method = 'PUT';
+      }
+
+      const res = await fetch(url, {
+        method: method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
       if (res.ok) {
-        sucEl.textContent = 'Машина добавлена! Обновляем список...';
+        sucEl.textContent = editingCarId ? 'Изменения сохранены!' : 'Машина добавлена!';
         try {
           await loadCars();
-        } catch (e) {
-          console.error("Ошибка обновления списка:", e);
-        }
+        } catch (e) {}
         setTimeout(closeAddModal, 800);
       } else {
         let errorText = 'Ошибка сервера: ' + res.status;
@@ -657,7 +767,7 @@ HTML_PAGE = """
       }
     } catch (err) {
       console.error('submitCar failed:', err);
-      errEl.textContent = 'Ошибка при обработке изображения или отправке';
+      errEl.textContent = 'Ошибка при обработке данных';
       errEl.style.display = 'block';
       sucEl.style.display = 'none';
     }
@@ -736,5 +846,54 @@ async def add_car(payload: dict):
                 payload.get("image_base64"))
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=400, detail="Машина с таким VIN уже существует")
+
+    return {"ok": True}
+
+
+@app.put("/api/cars/{car_id}")
+async def update_car(car_id: int, payload: dict):
+    if payload.get("admin_code") != ADMIN_CODE:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+    vin = payload.get("vin", "").strip().upper()
+    if not vin.startswith("AK-") or len(vin) != 6 or not vin[3:].isdigit():
+        raise HTTPException(status_code=400, detail="VIN должен быть в формате AK-000")
+
+    stars = int(payload.get("stars", 0))
+    if stars < 1 or stars > 8:
+        raise HTTPException(status_code=400, detail="Звёзд должно быть от 1 до 8")
+
+    drivetrain = payload.get("drivetrain")
+    if drivetrain not in ("FWD", "RWD", "AWD"):
+        raise HTTPException(status_code=400, detail="Недопустимый тип привода")
+
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute("""
+                UPDATE cars 
+                SET name=$1, stars=$2, vin=$3, horsepower=$4, acceleration=$5, top_speed=$6, drivetrain=$7, image_base64=$8
+                WHERE id=$9
+            """, payload["name"], stars, vin,
+                int(payload["horsepower"]),
+                float(payload["acceleration"]),
+                int(payload["top_speed"]),
+                drivetrain,
+                payload.get("image_base64"),
+                car_id)
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=400, detail="Машина с таким VIN уже существует")
+
+    return {"ok": True}
+
+
+@app.delete("/api/cars/{car_id}")
+async def delete_car(car_id: int, admin_code: str):
+    if admin_code != ADMIN_CODE:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM cars WHERE id = $1", car_id)
 
     return {"ok": True}
