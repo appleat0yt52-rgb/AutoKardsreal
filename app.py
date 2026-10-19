@@ -1,3 +1,62 @@
+import os
+from contextlib import asynccontextmanager
+
+import asyncpg
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+ADMIN_CODE = "AppleAT"
+
+
+# ---------- Работа с БД ----------
+async def get_pool():
+    return await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        ssl="require",
+    )
+
+
+async def init_db(pool):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS cars (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                stars INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 8),
+                vin TEXT NOT NULL UNIQUE,
+                horsepower INTEGER NOT NULL,
+                acceleration REAL NOT NULL,
+                top_speed INTEGER NOT NULL,
+                drivetrain TEXT NOT NULL CHECK (drivetrain IN ('FWD', 'RWD', 'AWD')),
+                image_base64 TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.pool = await get_pool()
+    await init_db(app.state.pool)
+    yield
+    await app.state.pool.close()
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------- HTML + CSS + JS ----------
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -511,3 +570,62 @@ HTML_PAGE = """
 </body>
 </html>
 """
+
+
+# ---------- API ----------
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return HTML_PAGE
+
+
+@app.get("/api/cars")
+async def list_cars():
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, name, stars, vin, horsepower, acceleration, top_speed, drivetrain, image_base64
+            FROM cars ORDER BY created_at DESC
+        """)
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/admin/check")
+async def check_admin(payload: dict):
+    if payload.get("code") != ADMIN_CODE:
+        raise HTTPException(status_code=403, detail="Неверный код")
+    return {"ok": True}
+
+
+@app.post("/api/cars")
+async def add_car(payload: dict):
+    if payload.get("admin_code") != ADMIN_CODE:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+    vin = payload.get("vin", "").strip().upper()
+    if not vin.startswith("AK-") or len(vin) != 6 or not vin[3:].isdigit():
+        raise HTTPException(status_code=400, detail="VIN должен быть в формате AK-000")
+
+    stars = int(payload.get("stars", 0))
+    if stars < 1 or stars > 8:
+        raise HTTPException(status_code=400, detail="Звёзд должно быть от 1 до 8")
+
+    drivetrain = payload.get("drivetrain")
+    if drivetrain not in ("FWD", "RWD", "AWD"):
+        raise HTTPException(status_code=400, detail="Недопустимый тип привода")
+
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute("""
+                INSERT INTO cars (name, stars, vin, horsepower, acceleration, top_speed, drivetrain, image_base64)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """, payload["name"], stars, vin,
+                int(payload["horsepower"]),
+                float(payload["acceleration"]),
+                int(payload["top_speed"]),
+                drivetrain,
+                payload.get("image_base64"))
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=400, detail="Машина с таким VIN уже существует")
+
+    return {"ok": True}
