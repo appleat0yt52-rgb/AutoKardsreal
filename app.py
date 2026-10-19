@@ -62,7 +62,6 @@ async def lifespan(app: FastAPI):
     await app.state.pool.close()
 
 
-# ВАЖНО: Эта строка должна быть без отступов, иначе Layero выдаст ошибку
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
@@ -195,7 +194,7 @@ HTML_PAGE = """
   }
   .modal h2 { color: var(--accent-dark); margin-bottom: 6px; font-size: 1.6rem; }
   .modal .vin { color: var(--muted); font-size: 0.9rem; margin-bottom: 12px; }
-  .modal img {
+  .modal img.car-img {
     width: 100%;
     max-height: 240px;
     object-fit: contain;
@@ -217,6 +216,26 @@ HTML_PAGE = """
     letter-spacing: 1px;
   }
   .spec-value { font-size: 1.1rem; font-weight: 700; color: var(--text); margin-top: 2px; }
+
+  /* Блок с QR-кодом */
+  .qr-section {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px dashed var(--border);
+    text-align: center;
+  }
+  .qr-section p {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .qr-section img {
+    width: 140px;
+    height: 140px;
+    border: 4px solid #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+  }
 
   .admin-bar {
     text-align: center;
@@ -339,9 +358,15 @@ HTML_PAGE = """
     <button class="modal-close" onclick="closeViewModal()">×</button>
     <h2 id="viewName"></h2>
     <div class="vin" id="viewVin"></div>
-    <img id="viewImage" src="" alt="">
+    <img id="viewImage" class="car-img" src="" alt="">
     <div class="stars" id="viewStars"></div>
     <div class="specs" id="viewSpecs"></div>
+    
+    <!-- Блок для QR-кода -->
+    <div class="qr-section">
+      <p>Отсканируйте, чтобы открыть эту карточку</p>
+      <img id="qrImage" src="" alt="QR Code">
+    </div>
   </div>
 </div>
 
@@ -412,7 +437,6 @@ HTML_PAGE = """
     console.error('JS Error:', e.message, 'at', e.filename, e.lineno);
   });
 
-  // --- Сжатие изображения перед отправкой ---
   function compressImage(file, maxWidth = 800, quality = 0.8) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -424,18 +448,14 @@ HTML_PAGE = """
           const canvas = document.createElement('canvas');
           let width = img.width;
           let height = img.height;
-
           if (width > maxWidth) {
             height = Math.round((height * maxWidth) / width);
             width = maxWidth;
           }
-
           canvas.width = width;
           canvas.height = height;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, width, height);
-          
-          // Возвращаем Base64 без префикса
           resolve(canvas.toDataURL('image/jpeg', quality).split(',')[1]);
         };
         img.onerror = reject;
@@ -444,10 +464,8 @@ HTML_PAGE = """
     });
   }
 
-  // --- Загрузка карточек ---
   async function loadCars() {
     try {
-      // cache: 'no-store' заставляет браузер всегда запрашивать свежие данные
       const res = await fetch(API + '/api/cars', { cache: 'no-store' });
       if (!res.ok) throw new Error('Сервер вернул ошибку ' + res.status);
       
@@ -467,7 +485,6 @@ HTML_PAGE = """
         card.className = 'card';
         card.onclick = () => openViewModal(car);
         const starsStr = '★'.repeat(car.stars) + '☆'.repeat(8 - car.stars);
-        
         const imgSrc = car.image_base64 ? 'data:image/jpeg;base64,' + car.image_base64 : '';
         
         card.innerHTML = `
@@ -480,17 +497,30 @@ HTML_PAGE = """
         `;
         grid.appendChild(card);
       });
+
+      // --- ПРОВЕРКА ССЫЛКИ НА QR-КОД ---
+      const urlParams = new URLSearchParams(window.location.search);
+      const targetVin = urlParams.get('vin');
+      
+      if (targetVin) {
+        const targetCar = cars.find(c => c.vin.toUpperCase() === targetVin.toUpperCase());
+        if (targetCar) {
+          openViewModal(targetCar);
+        }
+      }
+      // ----------------------------------
+
     } catch (err) {
       console.error('loadCars failed:', err);
     }
   }
 
-  // --- Просмотр машины ---
   function openViewModal(car) {
     document.getElementById('viewName').textContent = car.name;
     document.getElementById('viewVin').textContent = 'VIN: ' + car.vin;
     document.getElementById('viewImage').src = car.image_base64 ? 'data:image/jpeg;base64,' + car.image_base64 : '';
     document.getElementById('viewStars').textContent = '★'.repeat(car.stars) + '☆'.repeat(8 - car.stars);
+    
     const drivetrainMap = { FWD: 'Передний', RWD: 'Задний', AWD: 'Полный' };
     document.getElementById('viewSpecs').innerHTML = `
       <div class="spec-item"><div class="spec-label">Л.С.</div><div class="spec-value">${car.horsepower}</div></div>
@@ -498,14 +528,26 @@ HTML_PAGE = """
       <div class="spec-item"><div class="spec-label">Макс. скорость</div><div class="spec-value">${car.top_speed} км/ч</div></div>
       <div class="spec-item"><div class="spec-label">Привод</div><div class="spec-value">${drivetrainMap[car.drivetrain] || car.drivetrain}</div></div>
     `;
+
+    // Генерация QR-кода для этой машины
+    const baseUrl = window.location.origin + window.location.pathname;
+    const shareUrl = baseUrl + '?vin=' + car.vin;
+    
+    // Используем бесплатный API для генерации QR (цвет оранжевый)
+    const qrApi = `https://quickchart.io/qr?text=${encodeURIComponent(shareUrl)}&size=200&color=ff8c00`;
+    document.getElementById('qrImage').src = qrApi;
+
     document.getElementById('viewModal').classList.add('active');
   }
 
   function closeViewModal() {
     document.getElementById('viewModal').classList.remove('active');
+    // Очищаем URL при закрытии модалки, чтобы можно было открыть другую
+    if (window.history.replaceState) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
   }
 
-  // --- Админка ---
   async function activateAdmin() {
     const code = document.getElementById('secretCode').value.trim();
     const errEl = document.getElementById('adminError');
@@ -549,7 +591,6 @@ HTML_PAGE = """
     document.getElementById('addModal').classList.remove('active');
   }
 
-  // --- Добавление машины ---
   async function submitCar(e) {
     e.preventDefault();
     const errEl = document.getElementById('addError');
@@ -575,12 +616,9 @@ HTML_PAGE = """
     sucEl.style.display = 'block';
 
     try {
-      // 1. Сжимаем фото
       const base64 = await compressImage(file, 800, 0.8);
-      
       sucEl.textContent = 'Сохранение...';
       
-      // 2. Формируем данные
       const payload = {
         name: document.getElementById('carName').value.trim(),
         stars: parseInt(document.getElementById('carStars').value),
@@ -593,7 +631,6 @@ HTML_PAGE = """
         admin_code: adminCode
       };
 
-      // 3. Отправляем на сервер
       const res = await fetch(API + '/api/cars', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -602,14 +639,11 @@ HTML_PAGE = """
 
       if (res.ok) {
         sucEl.textContent = 'Машина добавлена! Обновляем список...';
-        
-        // 4. Обновляем список
         try {
           await loadCars();
         } catch (e) {
           console.error("Ошибка обновления списка:", e);
         }
-        
         setTimeout(closeAddModal, 800);
       } else {
         let errorText = 'Ошибка сервера: ' + res.status;
@@ -640,7 +674,6 @@ HTML_PAGE = """
     }
   });
 
-  // Запуск при загрузке страницы
   loadCars();
 </script>
 </body>
