@@ -22,6 +22,7 @@ async def get_pool():
 
 async def init_db(pool):
     async with pool.acquire() as conn:
+        # 1. Создаём таблицу, если её нет
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS cars (
                 id SERIAL PRIMARY KEY,
@@ -36,6 +37,21 @@ async def init_db(pool):
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        
+        # 2. Проверяем и добавляем недостающие колонки (для старых таблиц)
+        columns_to_add = {
+            "name": "TEXT",
+            "stars": "INTEGER",
+            "vin": "TEXT",
+            "horsepower": "INTEGER",
+            "acceleration": "REAL",
+            "top_speed": "INTEGER",
+            "drivetrain": "TEXT",
+            "image_base64": "TEXT",
+            "created_at": "TIMESTAMP DEFAULT NOW()"
+        }
+        for col_name, col_type in columns_to_add.items():
+            await conn.execute(f"ALTER TABLE cars ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
 
 
 @asynccontextmanager
@@ -46,6 +62,7 @@ async def lifespan(app: FastAPI):
     await app.state.pool.close()
 
 
+# ВАЖНО: Эта строка должна быть без отступов, иначе Layero выдаст ошибку
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
@@ -395,25 +412,66 @@ HTML_PAGE = """
     console.error('JS Error:', e.message, 'at', e.filename, e.lineno);
   });
 
+  // --- Сжатие изображения перед отправкой ---
+  function compressImage(file, maxWidth = 800, quality = 0.8) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = event => {
+        const img = new Image();
+        img.src = event.target.result;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          
+          // Возвращаем Base64 без префикса
+          resolve(canvas.toDataURL('image/jpeg', quality).split(',')[1]);
+        };
+        img.onerror = reject;
+      };
+      reader.onerror = reject;
+    });
+  }
+
+  // --- Загрузка карточек ---
   async function loadCars() {
     try {
-      const res = await fetch(API + '/api/cars');
+      // cache: 'no-store' заставляет браузер всегда запрашивать свежие данные
+      const res = await fetch(API + '/api/cars', { cache: 'no-store' });
+      if (!res.ok) throw new Error('Сервер вернул ошибку ' + res.status);
+      
       const cars = await res.json();
       const grid = document.getElementById('cardsGrid');
       const empty = document.getElementById('emptyState');
       grid.innerHTML = '';
+      
       if (cars.length === 0) {
         empty.style.display = 'block';
         return;
       }
+      
       empty.style.display = 'none';
       cars.forEach(car => {
         const card = document.createElement('div');
         card.className = 'card';
         card.onclick = () => openViewModal(car);
         const starsStr = '★'.repeat(car.stars) + '☆'.repeat(8 - car.stars);
+        
+        const imgSrc = car.image_base64 ? 'data:image/jpeg;base64,' + car.image_base64 : '';
+        
         card.innerHTML = `
-          <img src="${car.image_base64 ? 'data:image/png;base64,' + car.image_base64 : ''}" alt="${car.name}">
+          <img src="${imgSrc}" alt="${car.name}">
           <div class="card-body">
             <div class="card-name">${car.name}</div>
             <div class="card-vin">${car.vin}</div>
@@ -427,10 +485,11 @@ HTML_PAGE = """
     }
   }
 
+  // --- Просмотр машины ---
   function openViewModal(car) {
     document.getElementById('viewName').textContent = car.name;
     document.getElementById('viewVin').textContent = 'VIN: ' + car.vin;
-    document.getElementById('viewImage').src = car.image_base64 ? 'data:image/png;base64,' + car.image_base64 : '';
+    document.getElementById('viewImage').src = car.image_base64 ? 'data:image/jpeg;base64,' + car.image_base64 : '';
     document.getElementById('viewStars').textContent = '★'.repeat(car.stars) + '☆'.repeat(8 - car.stars);
     const drivetrainMap = { FWD: 'Передний', RWD: 'Задний', AWD: 'Полный' };
     document.getElementById('viewSpecs').innerHTML = `
@@ -446,6 +505,7 @@ HTML_PAGE = """
     document.getElementById('viewModal').classList.remove('active');
   }
 
+  // --- Админка ---
   async function activateAdmin() {
     const code = document.getElementById('secretCode').value.trim();
     const errEl = document.getElementById('adminError');
@@ -474,10 +534,7 @@ HTML_PAGE = """
   }
 
   function openAddModal() {
-    if (!isAdmin) {
-      console.warn('openAddModal called but isAdmin is false');
-      return;
-    }
+    if (!isAdmin) return;
     try {
       document.getElementById('addForm').reset();
       document.getElementById('addError').style.display = 'none';
@@ -492,6 +549,7 @@ HTML_PAGE = """
     document.getElementById('addModal').classList.remove('active');
   }
 
+  // --- Добавление машины ---
   async function submitCar(e) {
     e.preventDefault();
     const errEl = document.getElementById('addError');
@@ -513,45 +571,62 @@ HTML_PAGE = """
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = async function() {
-      try {
-        const base64 = reader.result.split(',')[1];
-        const payload = {
-          name: document.getElementById('carName').value.trim(),
-          stars: parseInt(document.getElementById('carStars').value),
-          vin: document.getElementById('carVin').value.trim().toUpperCase(),
-          horsepower: parseInt(document.getElementById('carHp').value),
-          acceleration: parseFloat(document.getElementById('carAccel').value),
-          top_speed: parseInt(document.getElementById('carTopSpeed').value),
-          drivetrain: document.getElementById('carDrivetrain').value,
-          image_base64: base64,
-          admin_code: adminCode
-        };
+    sucEl.textContent = 'Обработка фото...';
+    sucEl.style.display = 'block';
 
-        const res = await fetch(API + '/api/cars', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+    try {
+      // 1. Сжимаем фото
+      const base64 = await compressImage(file, 800, 0.8);
+      
+      sucEl.textContent = 'Сохранение...';
+      
+      // 2. Формируем данные
+      const payload = {
+        name: document.getElementById('carName').value.trim(),
+        stars: parseInt(document.getElementById('carStars').value),
+        vin: document.getElementById('carVin').value.trim().toUpperCase(),
+        horsepower: parseInt(document.getElementById('carHp').value),
+        acceleration: parseFloat(document.getElementById('carAccel').value),
+        top_speed: parseInt(document.getElementById('carTopSpeed').value),
+        drivetrain: document.getElementById('carDrivetrain').value,
+        image_base64: base64,
+        admin_code: adminCode
+      };
 
-        if (res.ok) {
-          sucEl.textContent = 'Машина добавлена!';
-          sucEl.style.display = 'block';
+      // 3. Отправляем на сервер
+      const res = await fetch(API + '/api/cars', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        sucEl.textContent = 'Машина добавлена! Обновляем список...';
+        
+        // 4. Обновляем список
+        try {
           await loadCars();
-          setTimeout(closeAddModal, 800);
-        } else {
-          const data = await res.json();
-          errEl.textContent = data.detail || 'Ошибка при добавлении';
-          errEl.style.display = 'block';
+        } catch (e) {
+          console.error("Ошибка обновления списка:", e);
         }
-      } catch (err) {
-        console.error('submitCar failed:', err);
-        errEl.textContent = 'Ошибка сети';
+        
+        setTimeout(closeAddModal, 800);
+      } else {
+        let errorText = 'Ошибка сервера: ' + res.status;
+        try {
+          const data = await res.json();
+          errorText = data.detail || errorText;
+        } catch (e) {}
+        errEl.textContent = errorText;
         errEl.style.display = 'block';
+        sucEl.style.display = 'none';
       }
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      console.error('submitCar failed:', err);
+      errEl.textContent = 'Ошибка при обработке изображения или отправке';
+      errEl.style.display = 'block';
+      sucEl.style.display = 'none';
+    }
   }
 
   document.getElementById('addCarBtn').addEventListener('click', function(e) {
@@ -565,6 +640,7 @@ HTML_PAGE = """
     }
   });
 
+  // Запуск при загрузке страницы
   loadCars();
 </script>
 </body>
