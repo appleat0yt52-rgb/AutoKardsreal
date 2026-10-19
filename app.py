@@ -129,12 +129,54 @@ HTML_PAGE = """
     }
   }
   .subtitle { color: var(--muted); margin-top: 8px; font-size: 1.1rem; }
+  
+  /* Личный счетчик сканирований */
+  .personal-stats {
+    text-align: center;
+    margin-top: 15px;
+    font-size: 1.1rem;
+    color: var(--text);
+    display: none;
+  }
+  .personal-stats span {
+    background: var(--accent);
+    color: #fff;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-weight: bold;
+  }
+
   .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+  
+  /* Кнопка фильтра избранного */
+  .filter-container {
+    text-align: center;
+    margin: 20px 0 10px;
+  }
+  .fav-filter-btn {
+    background: #fff;
+    border: 2px solid var(--border);
+    border-radius: 14px;
+    padding: 10px 20px;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--accent-dark);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .fav-filter-btn:hover { background: #fff0d9; }
+  .fav-filter-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    box-shadow: 0 4px 15px rgba(255, 140, 0, 0.4);
+  }
+
   .cards-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
     gap: 20px;
-    margin-top: 30px;
+    margin-top: 20px;
   }
   .card {
     background: var(--card-bg);
@@ -162,7 +204,7 @@ HTML_PAGE = """
   .card-vin { font-size: 0.8rem; color: var(--muted); margin-top: 4px; letter-spacing: 1px; }
   .stars { margin-top: 6px; color: var(--accent); font-size: 1rem; letter-spacing: 2px; }
   
-  /* Счётчик на карточке */
+  /* Бейджи на карточке */
   .views-badge {
     position: absolute;
     top: 10px;
@@ -178,7 +220,28 @@ HTML_PAGE = """
     display: flex;
     align-items: center;
     gap: 4px;
+    z-index: 10;
   }
+  .fav-btn {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    cursor: pointer;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    transition: transform 0.2s;
+    z-index: 10;
+    padding: 0;
+  }
+  .fav-btn:hover { transform: scale(1.15); }
 
   .modal-overlay {
     display: none;
@@ -213,6 +276,7 @@ HTML_PAGE = """
     font-size: 2rem;
     cursor: pointer;
     line-height: 1;
+    z-index: 20;
   }
   .modal h2 { color: var(--accent-dark); margin-bottom: 6px; font-size: 1.6rem; }
   .modal .vin { color: var(--muted); font-size: 0.9rem; margin-bottom: 12px; display: flex; justify-content: space-between;}
@@ -387,14 +451,24 @@ HTML_PAGE = """
 <div class="header">
   <div class="logo">AUTOKARDS</div>
   <div class="subtitle">Это небольшой проект для автолюбителей — добро пожаловать!</div>
+  <div id="personalStats" class="personal-stats">
+    Вы отсканировали кодов: <span id="scanCount">0</span>
+  </div>
 </div>
 
 <div class="container">
+  <div class="filter-container">
+    <button id="showFavBtn" class="fav-filter-btn" onclick="toggleShowFavs()">⭐ Показать избранное</button>
+  </div>
+
   <div id="cardsGrid" class="cards-grid"></div>
   <div id="emptyState" class="empty-state" style="display:none;">
     Пока нет ни одной карточки. Добавьте первую!
   </div>
-  <button id="addCarBtn" class="add-car-btn" type="button">➕ Добавить машину</button>
+  
+  <div style="text-align: center;">
+    <button id="addCarBtn" class="add-car-btn" type="button">➕ Добавить машину</button>
+  </div>
 </div>
 
 <div id="viewModal" class="modal-overlay">
@@ -490,10 +564,25 @@ HTML_PAGE = """
   let adminCode = '';
   let currentViewCar = null; 
   let editingCarId = null;   
+  
+  // Переменные для избранного и счетчиков
+  let favorites = JSON.parse(localStorage.getItem('favorites') || '[]');
+  let showOnlyFavs = false;
+  let initialLoad = true; // Защита от повторного считывания ?vin= при обновлении списка
 
   window.addEventListener('error', function(e) {
     console.error('JS Error:', e.message, 'at', e.filename, e.lineno);
   });
+
+  // --- Личный счетчик сканирований ---
+  function updateStats() {
+    const scanned = localStorage.getItem('scannedCodes') || '0';
+    const statsEl = document.getElementById('personalStats');
+    if (parseInt(scanned) > 0) {
+      statsEl.style.display = 'block';
+      document.getElementById('scanCount').textContent = scanned;
+    }
+  }
 
   function compressImage(file, maxWidth = 800, quality = 0.8) {
     return new Promise((resolve, reject) => {
@@ -523,6 +612,38 @@ HTML_PAGE = """
     });
   }
 
+  // --- Переключение избранного ---
+  function toggleFav(e, vin) {
+    e.stopPropagation(); // Чтобы не открывалась карточка
+    if (favorites.includes(vin)) {
+      favorites = favorites.filter(v => v !== vin);
+    } else {
+      favorites.push(vin);
+    }
+    localStorage.setItem('favorites', JSON.stringify(favorites));
+    
+    // Обновляем иконку на карточке
+    e.target.textContent = favorites.includes(vin) ? '❤️' : '🤍';
+    
+    // Если мы в режиме "Только избранное" и удалили из избранного — скрываем карточку
+    if (showOnlyFavs && !favorites.includes(vin)) {
+      loadCars();
+    }
+  }
+
+  function toggleShowFavs() {
+    showOnlyFavs = !showOnlyFavs;
+    const btn = document.getElementById('showFavBtn');
+    if (showOnlyFavs) {
+      btn.classList.add('active');
+      btn.textContent = '⭐ Показать все';
+    } else {
+      btn.classList.remove('active');
+      btn.textContent = '⭐ Показать избранное';
+    }
+    loadCars();
+  }
+
   async function loadCars() {
     try {
       const res = await fetch(API + '/api/cars', { cache: 'no-store' });
@@ -533,20 +654,26 @@ HTML_PAGE = """
       const empty = document.getElementById('emptyState');
       grid.innerHTML = '';
       
-      if (cars.length === 0) {
+      // Фильтруем, если нажата кнопка "Показать избранное"
+      const filteredCars = showOnlyFavs ? cars.filter(c => favorites.includes(c.vin)) : cars;
+      
+      if (filteredCars.length === 0) {
         empty.style.display = 'block';
+        empty.textContent = showOnlyFavs ? 'В избранном пока пусто.' : 'Пока нет ни одной карточки. Добавьте первую!';
         return;
       }
       
       empty.style.display = 'none';
-      cars.forEach(car => {
+      filteredCars.forEach(car => {
         const card = document.createElement('div');
         card.className = 'card';
         card.onclick = () => openViewModal(car);
         const starsStr = '★'.repeat(car.stars) + '☆'.repeat(8 - car.stars);
         const imgSrc = car.image_base64 ? 'data:image/jpeg;base64,' + car.image_base64 : '';
+        const isFav = favorites.includes(car.vin);
         
         card.innerHTML = `
+          <button class="fav-btn" onclick="toggleFav(event, '${car.vin}')">${isFav ? '❤️' : '🤍'}</button>
           <div class="views-badge">👁️ ${car.views || 0}</div>
           <img src="${imgSrc}" alt="${car.name}">
           <div class="card-body">
@@ -558,25 +685,34 @@ HTML_PAGE = """
         grid.appendChild(card);
       });
 
-      // --- ПРОВЕРКА ССЫЛКИ НА QR-КОД И СЧЕТЧИК ---
-      const urlParams = new URLSearchParams(window.location.search);
-      const targetVin = urlParams.get('vin');
-      
-      if (targetVin) {
-        const targetCar = cars.find(c => c.vin.toUpperCase() === targetVin.toUpperCase());
-        if (targetCar) {
-          // Отправляем запрос на сервер, чтобы засчитать просмотр
-          fetch(`${API}/api/cars/view/${targetCar.vin}`, { method: 'POST' })
-            .then(() => {
-              targetCar.views = (targetCar.views || 0) + 1;
-              openViewModal(targetCar);
-            })
-            .catch(err => {
-              console.error('Не удалось обновить счетчик', err);
-              openViewModal(targetCar);
-            });
+      // --- ПРОВЕРКА ССЫЛКИ НА QR-КОД (только при первой загрузке страницы) ---
+      if (initialLoad) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const targetVin = urlParams.get('vin');
+        
+        if (targetVin) {
+          // Увеличиваем ЛИЧНЫЙ счетчик пользователя
+          let scanned = parseInt(localStorage.getItem('scannedCodes') || '0');
+          localStorage.setItem('scannedCodes', scanned + 1);
+          updateStats();
+
+          const targetCar = cars.find(c => c.vin.toUpperCase() === targetVin.toUpperCase());
+          if (targetCar) {
+            // Увеличиваем ОБЩИЙ счетчик в базе
+            fetch(`${API}/api/cars/view/${targetCar.vin}`, { method: 'POST' })
+              .then(() => {
+                targetCar.views = (targetCar.views || 0) + 1;
+                openViewModal(targetCar);
+              })
+              .catch(err => {
+                console.error('Не удалось обновить счетчик', err);
+                openViewModal(targetCar);
+              });
+          }
         }
+        initialLoad = false;
       }
+      // ---------------------------------------------------------------------
 
     } catch (err) {
       console.error('loadCars failed:', err);
@@ -813,6 +949,8 @@ HTML_PAGE = """
     }
   });
 
+  // Запуск при загрузке страницы
+  updateStats(); // Показываем личный счетчик, если он есть
   loadCars();
 </script>
 </body>
