@@ -34,6 +34,7 @@ async def init_db(pool):
                 top_speed INTEGER NOT NULL,
                 drivetrain TEXT NOT NULL CHECK (drivetrain IN ('FWD', 'RWD', 'AWD')),
                 image_base64 TEXT,
+                views INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -48,6 +49,7 @@ async def init_db(pool):
             "top_speed": "INTEGER",
             "drivetrain": "TEXT",
             "image_base64": "TEXT",
+            "views": "INTEGER DEFAULT 0",
             "created_at": "TIMESTAMP DEFAULT NOW()"
         }
         for col_name, col_type in columns_to_add.items():
@@ -142,6 +144,7 @@ HTML_PAGE = """
     cursor: pointer;
     transition: transform 0.2s, box-shadow 0.2s;
     box-shadow: 0 2px 8px rgba(255, 140, 0, 0.15);
+    position: relative;
   }
   .card:hover {
     transform: translateY(-6px);
@@ -158,6 +161,24 @@ HTML_PAGE = """
   .card-name { font-size: 1.2rem; font-weight: 700; color: var(--accent-dark); }
   .card-vin { font-size: 0.8rem; color: var(--muted); margin-top: 4px; letter-spacing: 1px; }
   .stars { margin-top: 6px; color: var(--accent); font-size: 1rem; letter-spacing: 2px; }
+  
+  /* Счётчик на карточке */
+  .views-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid var(--border);
+    padding: 4px 8px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--accent-dark);
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
 
   .modal-overlay {
     display: none;
@@ -194,7 +215,7 @@ HTML_PAGE = """
     line-height: 1;
   }
   .modal h2 { color: var(--accent-dark); margin-bottom: 6px; font-size: 1.6rem; }
-  .modal .vin { color: var(--muted); font-size: 0.9rem; margin-bottom: 12px; }
+  .modal .vin { color: var(--muted); font-size: 0.9rem; margin-bottom: 12px; display: flex; justify-content: space-between;}
   .modal img.car-img {
     width: 100%;
     max-height: 240px;
@@ -380,7 +401,10 @@ HTML_PAGE = """
   <div class="modal">
     <button class="modal-close" onclick="closeViewModal()">×</button>
     <h2 id="viewName"></h2>
-    <div class="vin" id="viewVin"></div>
+    <div class="vin">
+      <span id="viewVin"></span>
+      <span id="viewViews" style="font-weight: bold; color: var(--accent);"></span>
+    </div>
     <img id="viewImage" class="car-img" src="" alt="">
     <div class="stars" id="viewStars"></div>
     <div class="specs" id="viewSpecs"></div>
@@ -464,8 +488,8 @@ HTML_PAGE = """
   const API = '';
   let isAdmin = false;
   let adminCode = '';
-  let currentViewCar = null; // Машина, открытая в данный момент
-  let editingCarId = null;   // ID машины, которую редактируем (null = добавление)
+  let currentViewCar = null; 
+  let editingCarId = null;   
 
   window.addEventListener('error', function(e) {
     console.error('JS Error:', e.message, 'at', e.filename, e.lineno);
@@ -523,6 +547,7 @@ HTML_PAGE = """
         const imgSrc = car.image_base64 ? 'data:image/jpeg;base64,' + car.image_base64 : '';
         
         card.innerHTML = `
+          <div class="views-badge">👁️ ${car.views || 0}</div>
           <img src="${imgSrc}" alt="${car.name}">
           <div class="card-body">
             <div class="card-name">${car.name}</div>
@@ -533,14 +558,23 @@ HTML_PAGE = """
         grid.appendChild(card);
       });
 
-      // --- ПРОВЕРКА ССЫЛКИ НА QR-КОД ---
+      // --- ПРОВЕРКА ССЫЛКИ НА QR-КОД И СЧЕТЧИК ---
       const urlParams = new URLSearchParams(window.location.search);
       const targetVin = urlParams.get('vin');
       
       if (targetVin) {
         const targetCar = cars.find(c => c.vin.toUpperCase() === targetVin.toUpperCase());
         if (targetCar) {
-          openViewModal(targetCar);
+          // Отправляем запрос на сервер, чтобы засчитать просмотр
+          fetch(`${API}/api/cars/view/${targetCar.vin}`, { method: 'POST' })
+            .then(() => {
+              targetCar.views = (targetCar.views || 0) + 1;
+              openViewModal(targetCar);
+            })
+            .catch(err => {
+              console.error('Не удалось обновить счетчик', err);
+              openViewModal(targetCar);
+            });
         }
       }
 
@@ -553,6 +587,7 @@ HTML_PAGE = """
     currentViewCar = car;
     document.getElementById('viewName').textContent = car.name;
     document.getElementById('viewVin').textContent = 'VIN: ' + car.vin;
+    document.getElementById('viewViews').textContent = '👁️ ' + (car.views || 0);
     document.getElementById('viewImage').src = car.image_base64 ? 'data:image/jpeg;base64,' + car.image_base64 : '';
     document.getElementById('viewStars').textContent = '★'.repeat(car.stars) + '☆'.repeat(8 - car.stars);
     
@@ -600,7 +635,6 @@ HTML_PAGE = """
         adminCode = code;
         document.getElementById('addCarBtn').classList.add('visible');
         errEl.style.display = 'none';
-        // Если открыта карточка, сразу показываем кнопки
         if (currentViewCar) {
           document.getElementById('adminActions').style.display = 'flex';
         }
@@ -614,16 +648,15 @@ HTML_PAGE = """
     }
   }
 
-  // --- Добавление / Редактирование ---
   function openAddModal() {
     if (!isAdmin) return;
     
-    editingCarId = null; // Сбрасываем режим редактирования
+    editingCarId = null; 
     document.getElementById('addForm').reset();
     document.getElementById('addModalTitle').textContent = 'Добавить машину';
     document.getElementById('submitBtnText').textContent = 'Добавить';
     document.getElementById('imageNote').style.display = 'none';
-    document.getElementById('carImage').required = true; // При добавлении фото обязательно
+    document.getElementById('carImage').required = true;
     
     document.getElementById('addError').style.display = 'none';
     document.getElementById('addSuccess').style.display = 'none';
@@ -636,7 +669,6 @@ HTML_PAGE = """
     editingCarId = currentViewCar.id;
     const car = currentViewCar;
     
-    // Заполняем форму данными
     document.getElementById('carName').value = car.name;
     document.getElementById('carStars').value = car.stars;
     document.getElementById('carVin').value = car.vin;
@@ -645,11 +677,10 @@ HTML_PAGE = """
     document.getElementById('carTopSpeed').value = car.top_speed;
     document.getElementById('carDrivetrain').value = car.drivetrain;
     
-    // Настраиваем интерфейс под редактирование
     document.getElementById('addModalTitle').textContent = 'Редактировать машину';
     document.getElementById('submitBtnText').textContent = 'Сохранить';
     document.getElementById('imageNote').style.display = 'block';
-    document.getElementById('carImage').required = false; // Фото не обязательно менять
+    document.getElementById('carImage').required = false;
     
     document.getElementById('addError').style.display = 'none';
     document.getElementById('addSuccess').style.display = 'none';
@@ -701,7 +732,6 @@ HTML_PAGE = """
     const fileInput = document.getElementById('carImage');
     const file = fileInput.files[0];
     
-    // Если добавляем новую, фото обязательно
     if (!editingCarId && !file) {
       errEl.textContent = 'Выберите изображение';
       errEl.style.display = 'block';
@@ -714,11 +744,10 @@ HTML_PAGE = """
     try {
       let base64 = null;
       
-      // Если выбрали новое фото — сжимаем. Если редактируем и фото нет — оставляем null, бэкенд сохранит старое.
       if (file) {
         base64 = await compressImage(file, 800, 0.8);
       } else if (editingCarId) {
-        base64 = currentViewCar.image_base64; // Берем старое фото
+        base64 = currentViewCar.image_base64; 
       }
       
       sucEl.textContent = 'Сохранение...';
@@ -802,10 +831,18 @@ async def list_cars():
     pool = app.state.pool
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT id, name, stars, vin, horsepower, acceleration, top_speed, drivetrain, image_base64
+            SELECT id, name, stars, vin, horsepower, acceleration, top_speed, drivetrain, image_base64, views
             FROM cars ORDER BY created_at DESC
         """)
     return [dict(r) for r in rows]
+
+
+@app.post("/api/cars/view/{vin}")
+async def increment_view(vin: str):
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE cars SET views = views + 1 WHERE UPPER(vin) = UPPER($1)", vin)
+    return {"ok": True}
 
 
 @app.post("/api/admin/check")
@@ -836,8 +873,8 @@ async def add_car(payload: dict):
     async with pool.acquire() as conn:
         try:
             await conn.execute("""
-                INSERT INTO cars (name, stars, vin, horsepower, acceleration, top_speed, drivetrain, image_base64)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                INSERT INTO cars (name, stars, vin, horsepower, acceleration, top_speed, drivetrain, image_base64, views)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)
             """, payload["name"], stars, vin,
                 int(payload["horsepower"]),
                 float(payload["acceleration"]),
