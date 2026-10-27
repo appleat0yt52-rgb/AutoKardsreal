@@ -1,4 +1,5 @@
 import os
+import re
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -72,6 +73,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Функция для проверки VIN-кодов (поддерживает старые и новые форматы)
+def is_valid_vin(vin: str) -> bool:
+    # Разрешает: AK-123, AK-F-001, AK-001-BD
+    pattern = r"^AK-(F-)?\d{3}(-BD)?$"
+    return bool(re.match(pattern, vin))
 
 
 # ---------- HTML + CSS + JS ----------
@@ -518,8 +525,8 @@ HTML_PAGE = """
         <input type="number" id="carStars" min="1" max="8" required>
       </div>
       <div class="form-group">
-        <label>VIN номер (формат AK-000)</label>
-        <input type="text" id="carVin" placeholder="AK-123" pattern="AK-\\d{3}" required>
+        <label>Код / VIN номер</label>
+        <input type="text" id="carVin" placeholder="Например: AK-123, AK-F-001, AK-001-BD" pattern="AK-(F-)?\\d{3}(-BD)?" title="Форматы: AK-000, AK-F-000, AK-000-BD" required>
       </div>
       <div class="form-group">
         <label>Лошадиные силы</label>
@@ -565,16 +572,14 @@ HTML_PAGE = """
   let currentViewCar = null; 
   let editingCarId = null;   
   
-  // Переменные для избранного и счетчиков
   let favorites = JSON.parse(localStorage.getItem('favorites') || '[]');
   let showOnlyFavs = false;
-  let initialLoad = true; // Защита от повторного считывания ?vin= при обновлении списка
+  let initialLoad = true; 
 
   window.addEventListener('error', function(e) {
     console.error('JS Error:', e.message, 'at', e.filename, e.lineno);
   });
 
-  // --- Личный счетчик сканирований ---
   function updateStats() {
     const scanned = localStorage.getItem('scannedCodes') || '0';
     const statsEl = document.getElementById('personalStats');
@@ -612,9 +617,8 @@ HTML_PAGE = """
     });
   }
 
-  // --- Переключение избранного ---
   function toggleFav(e, vin) {
-    e.stopPropagation(); // Чтобы не открывалась карточка
+    e.stopPropagation(); 
     if (favorites.includes(vin)) {
       favorites = favorites.filter(v => v !== vin);
     } else {
@@ -622,10 +626,8 @@ HTML_PAGE = """
     }
     localStorage.setItem('favorites', JSON.stringify(favorites));
     
-    // Обновляем иконку на карточке
     e.target.textContent = favorites.includes(vin) ? '❤️' : '🤍';
     
-    // Если мы в режиме "Только избранное" и удалили из избранного — скрываем карточку
     if (showOnlyFavs && !favorites.includes(vin)) {
       loadCars();
     }
@@ -654,7 +656,6 @@ HTML_PAGE = """
       const empty = document.getElementById('emptyState');
       grid.innerHTML = '';
       
-      // Фильтруем, если нажата кнопка "Показать избранное"
       const filteredCars = showOnlyFavs ? cars.filter(c => favorites.includes(c.vin)) : cars;
       
       if (filteredCars.length === 0) {
@@ -685,20 +686,17 @@ HTML_PAGE = """
         grid.appendChild(card);
       });
 
-      // --- ПРОВЕРКА ССЫЛКИ НА QR-КОД (только при первой загрузке страницы) ---
       if (initialLoad) {
         const urlParams = new URLSearchParams(window.location.search);
         const targetVin = urlParams.get('vin');
         
         if (targetVin) {
-          // Увеличиваем ЛИЧНЫЙ счетчик пользователя
           let scanned = parseInt(localStorage.getItem('scannedCodes') || '0');
           localStorage.setItem('scannedCodes', scanned + 1);
           updateStats();
 
           const targetCar = cars.find(c => c.vin.toUpperCase() === targetVin.toUpperCase());
           if (targetCar) {
-            // Увеличиваем ОБЩИЙ счетчик в базе
             fetch(`${API}/api/cars/view/${targetCar.vin}`, { method: 'POST' })
               .then(() => {
                 targetCar.views = (targetCar.views || 0) + 1;
@@ -712,7 +710,6 @@ HTML_PAGE = """
         }
         initialLoad = false;
       }
-      // ---------------------------------------------------------------------
 
     } catch (err) {
       console.error('loadCars failed:', err);
@@ -735,13 +732,11 @@ HTML_PAGE = """
       <div class="spec-item"><div class="spec-label">Привод</div><div class="spec-value">${drivetrainMap[car.drivetrain] || car.drivetrain}</div></div>
     `;
 
-    // Генерация QR-кода
     const baseUrl = window.location.origin + window.location.pathname;
     const shareUrl = baseUrl + '?vin=' + car.vin;
     const qrApi = `https://quickchart.io/qr?text=${encodeURIComponent(shareUrl)}&size=200&color=ff8c00`;
     document.getElementById('qrImage').src = qrApi;
 
-    // Показываем кнопки админа, если он активирован
     document.getElementById('adminActions').style.display = isAdmin ? 'flex' : 'none';
 
     document.getElementById('viewModal').classList.add('active');
@@ -949,8 +944,7 @@ HTML_PAGE = """
     }
   });
 
-  // Запуск при загрузке страницы
-  updateStats(); // Показываем личный счетчик, если он есть
+  updateStats(); 
   loadCars();
 </script>
 </body>
@@ -996,8 +990,8 @@ async def add_car(payload: dict):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
 
     vin = payload.get("vin", "").strip().upper()
-    if not vin.startswith("AK-") or len(vin) != 6 or not vin[3:].isdigit():
-        raise HTTPException(status_code=400, detail="VIN должен быть в формате AK-000")
+    if not is_valid_vin(vin):
+        raise HTTPException(status_code=400, detail="Неверный формат кода. Допустимо: AK-000, AK-F-000, AK-000-BD")
 
     stars = int(payload.get("stars", 0))
     if stars < 1 or stars > 8:
@@ -1031,8 +1025,8 @@ async def update_car(car_id: int, payload: dict):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
 
     vin = payload.get("vin", "").strip().upper()
-    if not vin.startswith("AK-") or len(vin) != 6 or not vin[3:].isdigit():
-        raise HTTPException(status_code=400, detail="VIN должен быть в формате AK-000")
+    if not is_valid_vin(vin):
+        raise HTTPException(status_code=400, detail="Неверный формат кода. Допустимо: AK-000, AK-F-000, AK-000-BD")
 
     stars = int(payload.get("stars", 0))
     if stars < 1 or stars > 8:
